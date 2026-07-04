@@ -1,0 +1,239 @@
+/* ── Axiom RU translated popup — themeable ──────────────────────────────── */
+
+#axiom-x-translate-widget {
+  /* Dark theme (default) — matches the Axiom vibe */
+  --w-bg: #12161c;
+  --w-border: rgba(255, 255, 255, 0.10);
+  --w-shadow: 0 12px 30px rgba(0, 0, 0, 0.55);
+  --w-title: #ffffff;
+  --w-text: #e7e9ea;
+  --w-muted: #71767b;
+  --w-link: #1d9bf0;
+  --w-scroll-thumb: rgba(113, 118, 123, 0.5);
+  --w-scroll-track: rgba(255, 255, 255, 0.06);
+  --w-body-size: 15px;
+  /* Nested reply/quote card — dark theme: clearly visible light border. */
+  --w-quote-bg: rgba(255, 255, 255, 0.055);
+  --w-quote-border: rgba(255, 255, 255, 0.34);
+
+  position: fixed !important;
+  z-index: 999999 !important;
+  width: 360px !important;
+  min-width: 360px !important;
+  max-width: 360px !important;
+  min-height: 140px !important;
+  max-height: 520px !important;
+  background: var(--w-bg) !important;
+  border: 1px solid var(--w-border) !important;
+  border-radius: 14px !important;
+  box-shadow: var(--w-shadow) !important;
+  padding: 16px 18px !important;
+  box-sizing: border-box !important;
+  display: flex !important;
+  flex-direction: column !important;
+  color: var(--w-text) !important;
+  font-family: Inter, "Segoe UI", Arial, sans-serif !important;
+  opacity: 0 !important;
+  visibility: hidden !important;
+  pointer-events: auto !important;
+  transform: translateY(4px) !important;
+  transition: opacity 0.12s ease, transform 0.12s ease, visibility 0.12s ease !important;
+  overflow: hidden !important;
+}
+
+/* Light theme — clean & premium */
+#axiom-x-translate-widget[data-theme="light"] {
+  --w-bg: #ffffff;
+  --w-border: rgba(15, 20, 25, 0.10);
+  --w-shadow: 0 10px 26px rgba(15, 20, 25, 0.14);
+  --w-title: #0f1419;
+  --w-text: #0f1419;
+  --w-muted: #667080;
+  --w-link: #1d74d6;
+  --w-scroll-thumb: rgba(15, 20, 25, 0.22);
+  --w-scroll-track: rgba(15, 20, 25, 0.05);
+  /* Nested reply/quote card — light theme: clearly visible dark border. */
+  --w-quote-bg: rgba(15, 20, 25, 0.045);
+  --w-quote-border: rgba(15, 20, 25, 0.28);
+}
+
+/* Auto — follow the OS preference */
+@media (prefers-color-scheme: light) {
+  #axiom-x-translate-widget[data-theme="auto"] {
+    --w-bg: #ffffff;
+    --w-border: rgba(15, 20, 25, 0.10);
+    --w-shadow: 0 10px 26px rgba(15, 20, 25, 0.14);
+    --w-title: #0f1419;
+    --w-text: #0f1419;
+    --w-muted: #667080;
+    --w-link: #1d74d6;
+    --w-scroll-thumb: rgba(15, 20, 25, 0.22);
+    --w-scroll-track: rgba(15, 20, 25, 0.05);
+    --w-quote-bg: rgba(15, 20, 25, 0.045);
+    --w-quote-border: rgba(15, 20, 25, 0.28);
+  }
+}
+
+/* Font-size setting */
+#axiom-x-translate-widget[data-font="small"]  { --w-body-size: 13px; }
+#axiom-x-translate-widget[data-font="medium"] { --w-body-size: 15px; }
+#axiom-x-translate-widget[data-font="large"]  { --w-body-size: 17px; }
+
+#axiom-x-translate-widget.show {
+  opacity: 1 !important;
+  visibility: visible !important;
+  transform: translateY(0) !important;
+}
+
+/* Identity block — mirrors an X post header (name over @handle · time). */
+.axiom-x-head {
+  margin-bottom: 4px !important;
+}
+
+.axiom-x-name {
+  font-size: 15px !important;
+  font-weight: 700 !important;
+  line-height: 1.3 !important;
+  color: var(--w-title) !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+
+.axiom-x-sub {
+  font-size: 14px !important;
+  line-height: 1.3 !important;
+  color: var(--w-muted) !important;
+  margin-top: 1px !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+
+/* Profile meta (joined · followers) — de-emphasized; not part of the tweet. */
+.axiom-x-meta {
+  font-size: 12px !important;
+  color: var(--w-muted) !important;
+  line-height: 1.4 !important;
+  opacity: 0.8 !important;
+  margin-bottom: 10px !important;
+}
+.axiom-x-meta:empty { display: none !important; }
+
+/* Main post text — readability first: X-like size, generous line-height,
+   preserved line breaks and paragraph gaps (no blobs). */
+.axiom-x-body {
+  flex: 1 1 auto !important;
+  margin-top: 8px !important;
+  font-size: var(--w-body-size) !important;
+  line-height: 1.55 !important;
+  color: var(--w-text) !important;
+  white-space: pre-wrap !important;
+  word-break: break-word !important;
+  min-height: 32px !important;
+  max-height: 400px !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  padding-right: 6px !important;
+  pointer-events: auto !important;
+  user-select: text !important;
+}
+
+/* Paragraph rhythm: blank lines from the source render as real gaps. */
+.axiom-x-body { white-space: pre-wrap !important; }
+
+.axiom-x-link {
+  color: var(--w-link) !important;
+  text-decoration: none !important;
+  word-break: break-all !important;
+  pointer-events: auto !important;
+  cursor: pointer !important;
+}
+
+.axiom-x-link:hover {
+  text-decoration: underline !important;
+}
+
+/* ── In-place error state + Retry ────────────────────────────────────────── */
+.axiom-x-error {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: flex-start !important;
+  gap: 10px !important;
+  padding: 4px 0 !important;
+}
+
+.axiom-x-error-msg {
+  font-size: 14px !important;
+  line-height: 1.45 !important;
+  color: var(--w-text) !important;
+}
+
+.axiom-x-retry {
+  appearance: none !important;
+  border: 1px solid var(--w-link) !important;
+  background: transparent !important;
+  color: var(--w-link) !important;
+  font: 600 13px/1 Inter, "Segoe UI", Arial, sans-serif !important;
+  padding: 8px 14px !important;
+  border-radius: 10px !important;
+  cursor: pointer !important;
+  transition: background 0.14s ease, color 0.14s ease !important;
+}
+
+.axiom-x-retry:hover {
+  background: var(--w-link) !important;
+  color: #fff !important;
+}
+
+/* ── Nested quoted / reply post — styled like an embedded X tweet ────────── */
+.axiom-x-quote {
+  margin-top: 12px !important;
+  padding: 10px 12px !important;
+  border: 1px solid var(--w-quote-border) !important;
+  border-radius: 16px !important;   /* X uses large rounded corners on quotes */
+  background: var(--w-quote-bg) !important;
+  box-shadow: none !important;
+}
+
+/* Embedded-tweet header: "Name @handle · time" on one baseline row. */
+.axiom-x-quote-head {
+  display: flex !important;
+  align-items: baseline !important;
+  flex-wrap: wrap !important;
+  gap: 5px !important;
+  margin-bottom: 4px !important;
+}
+
+.axiom-x-quote-name {
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  color: var(--w-title) !important;
+}
+
+.axiom-x-quote-sub {
+  font-size: 12px !important;
+  color: var(--w-muted) !important;
+  font-weight: 400 !important;
+}
+
+.axiom-x-quote-body {
+  font-size: calc(var(--w-body-size) - 1px) !important;
+  line-height: 1.5 !important;
+  color: var(--w-text) !important;
+  white-space: pre-wrap !important;
+  word-break: break-word !important;
+}
+
+.axiom-x-body::-webkit-scrollbar {
+  width: 8px !important;
+}
+
+.axiom-x-body::-webkit-scrollbar-thumb {
+  background: var(--w-scroll-thumb) !important;
+  border-radius: 999px !important;
+}
+
+.axiom-x-body::-webkit-scrollbar-track {
+  background: var(--w-scroll-track) !important;
+}

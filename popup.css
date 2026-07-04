@@ -1,0 +1,157 @@
+/* ── Axiom RU Translator — popup UI ─────────────────────────────────────── */
+
+:root {
+  --radius: 14px;
+  --radius-sm: 10px;
+  --gap: 12px;
+  --accent: #16c784;
+  --accent-2: #1d9bf0;
+}
+
+/* Dark theme (matches the Axiom vibe) */
+html[data-theme="dark"] {
+  --bg: #0d1117;
+  --card: #12161c;
+  --card-2: #171c23;
+  --text: #e7e9ea;
+  --muted: #8b98a5;
+  --border: rgba(255, 255, 255, 0.09);
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --seg-bg: #0e131a;
+  --seg-active: #223041;
+}
+
+/* Light theme (clean & premium) */
+html[data-theme="light"] {
+  --bg: #f4f6f8;
+  --card: #ffffff;
+  --card-2: #f7f9fb;
+  --text: #0f1419;
+  --muted: #667080;
+  --border: rgba(15, 20, 25, 0.10);
+  --shadow: 0 6px 18px rgba(15, 20, 25, 0.08);
+  --seg-bg: #eef1f4;
+  --seg-active: #ffffff;
+}
+
+/* Auto → follow the OS preference */
+@media (prefers-color-scheme: dark) {
+  html[data-theme="auto"] {
+    --bg: #0d1117; --card: #12161c; --card-2: #171c23; --text: #e7e9ea;
+    --muted: #8b98a5; --border: rgba(255,255,255,0.09);
+    --shadow: 0 8px 24px rgba(0,0,0,0.45); --seg-bg: #0e131a; --seg-active: #223041;
+  }
+}
+@media (prefers-color-scheme: light) {
+  html[data-theme="auto"] {
+    --bg: #f4f6f8; --card: #ffffff; --card-2: #f7f9fb; --text: #0f1419;
+    --muted: #667080; --border: rgba(15,20,25,0.10);
+    --shadow: 0 6px 18px rgba(15,20,25,0.08); --seg-bg: #eef1f4; --seg-active: #ffffff;
+  }
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  width: 320px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Inter, "Segoe UI", system-ui, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app { padding: 16px; display: flex; flex-direction: column; gap: var(--gap); }
+
+/* ── Header ──────────────────────────────────────────────────────────── */
+.head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.brand { display: flex; align-items: center; gap: 10px; }
+.logo {
+  width: 38px; height: 38px; border-radius: 11px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff; font-weight: 800; font-size: 14px;
+  display: grid; place-items: center; letter-spacing: 0.5px;
+}
+.brand-text h1 { font-size: 15px; font-weight: 700; line-height: 1.2; }
+.brand-text p { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+.tg-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--accent-2); color: #fff; border: none;
+  padding: 8px 12px; border-radius: var(--radius-sm);
+  font-size: 12px; font-weight: 600; cursor: pointer;
+  transition: filter 0.15s ease, transform 0.05s ease;
+}
+.tg-btn:hover { filter: brightness(1.08); }
+.tg-btn:active { transform: scale(0.97); }
+
+/* ── Cards ───────────────────────────────────────────────────────────── */
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 6px 14px;
+}
+.card.actions { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+
+.sep { height: 1px; background: var(--border); }
+
+/* ── Rows / toggles ──────────────────────────────────────────────────── */
+.row { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; gap: 12px; }
+.toggle-row { cursor: pointer; user-select: none; }
+.row-title { display: block; font-size: 13px; font-weight: 600; }
+.row-sub { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+.switch {
+  flex: 0 0 auto; width: 40px; height: 23px; border-radius: 999px;
+  background: var(--seg-bg); border: 1px solid var(--border);
+  position: relative; transition: background 0.16s ease;
+}
+.knob {
+  position: absolute; top: 2px; left: 2px; width: 17px; height: 17px;
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+  transition: transform 0.16s ease;
+}
+.toggle-row.on .switch { background: var(--accent); border-color: transparent; }
+.toggle-row.on .knob { transform: translateX(17px); }
+
+/* ── Segmented controls ──────────────────────────────────────────────── */
+.seg-block { padding: 11px 0; }
+.seg-block + .seg-block { border-top: 1px solid var(--border); }
+.seg-title { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 8px; }
+.seg {
+  display: flex; gap: 4px; background: var(--seg-bg);
+  border-radius: var(--radius-sm); padding: 3px;
+}
+.seg button {
+  flex: 1; border: none; background: transparent; color: var(--muted);
+  font-size: 12px; font-weight: 600; padding: 7px 0; border-radius: 8px;
+  cursor: pointer; transition: all 0.14s ease;
+}
+.seg button:hover { color: var(--text); }
+.seg button.active {
+  background: var(--seg-active); color: var(--text);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+}
+
+/* ── Action buttons ──────────────────────────────────────────────────── */
+.action {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--card-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 11px 13px; font-size: 13px; font-weight: 600;
+  cursor: pointer; text-align: left; transition: all 0.14s ease;
+}
+.action:hover { border-color: var(--accent); }
+.action:active { transform: scale(0.99); }
+.action:disabled { opacity: 0.45; cursor: not-allowed; }
+.action-icon { font-size: 15px; color: var(--accent); }
+
+/* ── Toast ───────────────────────────────────────────────────────────── */
+.toast {
+  position: fixed; left: 50%; bottom: 12px; transform: translateX(-50%) translateY(20px);
+  background: var(--accent); color: #fff; font-size: 12px; font-weight: 600;
+  padding: 7px 14px; border-radius: 999px; opacity: 0; pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }

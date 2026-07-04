@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="popup.css" />
+  <title>Axiom Translator</title>
+</head>
+<body>
+  <div class="app">
+    <!-- Header / branding -->
+    <header class="head">
+      <div class="brand">
+        <div class="logo">A</div>
+        <div class="brand-text">
+          <h1>Axiom Translator</h1>
+          <p data-i18n="subtitle">Translate X posts on Axiom</p>
+        </div>
+      </div>
+      <button id="telegram" class="tg-btn" title="Telegram">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+          <path fill="currentColor" d="M9.78 15.6l-.4 4.02c.57 0 .82-.24 1.12-.53l2.7-2.56 5.6 4.1c1.02.56 1.75.27 2.02-.95L23.9 4.7c.35-1.6-.58-2.23-1.58-1.86L2.2 10.6c-1.56.6-1.54 1.47-.27 1.86l5.03 1.57L18.6 6.9c.55-.36 1.05-.16.64.2z"/>
+        </svg>
+        <span data-i18n="telegram">Telegram</span>
+      </button>
+    </header>
+
+    <!-- Language of the extension UI (also sets translation target) -->
+    <section class="card">
+      <div class="seg-block">
+        <span class="seg-title" data-i18n="language">Language</span>
+        <div class="seg" data-setting="uiLang">
+          <button data-value="en">EN</button>
+          <button data-value="ru">RU</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Translator toggles -->
+    <section class="card">
+      <div class="row toggle-row" data-toggle="autoTranslate">
+        <div class="row-label">
+          <span class="row-title" data-i18n="autoTitle">Auto-translate on hover</span>
+          <span class="row-sub" data-i18n="autoSub">Show the popup when hovering a post</span>
+        </div>
+        <span class="switch"><span class="knob"></span></span>
+      </div>
+      <div class="sep"></div>
+      <div class="row toggle-row" data-toggle="preserveLinks">
+        <div class="row-label">
+          <span class="row-title" data-i18n="preserveTitle">Preserve original links</span>
+          <span class="row-sub" data-i18n="preserveSub">Keep real hrefs as clickable links</span>
+        </div>
+        <span class="switch"><span class="knob"></span></span>
+      </div>
+    </section>
+
+    <!-- Segmented settings -->
+    <section class="card">
+      <div class="seg-block">
+        <span class="seg-title" data-i18n="side">Popup side</span>
+        <div class="seg" data-setting="side">
+          <button data-value="right" data-i18n="right">Right</button>
+          <button data-value="left" data-i18n="left">Left</button>
+          <button data-value="auto" data-i18n="auto">Auto</button>
+        </div>
+      </div>
+      <div class="seg-block">
+        <span class="seg-title" data-i18n="closeDelay">Close delay</span>
+        <div class="seg" data-setting="closeDelay">
+          <button data-value="fast" data-i18n="fast">Fast</button>
+          <button data-value="normal" data-i18n="normal">Normal</button>
+        </div>
+      </div>
+      <div class="seg-block">
+        <span class="seg-title" data-i18n="theme">Theme</span>
+        <div class="seg" data-setting="theme">
+          <button data-value="light" data-i18n="light">Light</button>
+          <button data-value="dark" data-i18n="dark">Dark</button>
+          <button data-value="auto" data-i18n="auto">Auto</button>
+        </div>
+      </div>
+      <div class="seg-block">
+        <span class="seg-title" data-i18n="fontSize">Font size</span>
+        <div class="seg" data-setting="fontSize">
+          <button data-value="small">S</button>
+          <button data-value="medium">M</button>
+          <button data-value="large">L</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Actions -->
+    <section class="card actions">
+      <button id="copyTranslation" class="action">
+        <span class="action-icon">⧉</span> <span data-i18n="copyTranslation">Copy last translation</span>
+      </button>
+      <button id="copyOriginal" class="action">
+        <span class="action-icon">⧉</span> <span data-i18n="copyOriginal">Copy original text</span>
+      </button>
+      <button id="openSource" class="action">
+        <span class="action-icon">↗</span> <span data-i18n="openSource">Open original post</span>
+      </button>
+    </section>
+
+    <div id="toast" class="toast"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Axiom Translator — RU/EN for X",
+  "version": "1.0.0",
+  "description": "Instantly translate X (Twitter) posts on Axiom into Russian or English in a clean side popup — with links and quoted replies preserved.",
+  "permissions": ["activeTab", "storage"],
+  "host_permissions": [
+    "https://axiom.trade/*",
+    "https://www.axiom.trade/*",
+    "https://translate.googleapis.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Axiom Translator",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://axiom.trade/*", "https://www.axiom.trade/*"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}
