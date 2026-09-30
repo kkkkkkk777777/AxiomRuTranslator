@@ -2,18 +2,14 @@
   if (window.__axiomInlineTranslatorLoaded) return;
   window.__axiomInlineTranslatorLoaded = true;
 
-  let syncTimer = null;
-  let lastSentAt = 0;
-  let mouseX = -1;
-  let mouseY = -1;
+  const LOG = '[Axiom Translator]';
 
   // ── User settings (persisted by the popup UI via chrome.storage.sync) ──────
   const SETTINGS_KEY = 'axiomRuSettings';
-  const LAST_KEY = 'axiomRuLast';
   const DEFAULT_SETTINGS = {
-    autoTranslate: true,
+    enabled: true,      // master on/off switch
     preserveLinks: true,
-    uiLang: 'ru' // ru | en — also sets the translation target
+    uiLang: 'ru'         // ru | en — translation target
   };
   let settings = { ...DEFAULT_SETTINGS };
 
@@ -21,12 +17,15 @@
     try {
       chrome.storage.sync.get(SETTINGS_KEY, (data) => {
         settings = { ...DEFAULT_SETTINGS, ...(data && data[SETTINGS_KEY]) };
-        if (settings.autoTranslate) scheduleSync(0);
+        if (settings.enabled) initialScan();
       });
       chrome.storage.onChanged.addListener((changes, area) => {
         if (area === 'sync' && changes[SETTINGS_KEY]) {
+          const wasEnabled = settings.enabled;
           settings = { ...DEFAULT_SETTINGS, ...changes[SETTINGS_KEY].newValue };
-          if (settings.autoTranslate) scheduleSync(0);
+          // Turning the translator back on should catch up on whatever is
+          // already on screen, not just newly-mounted cards.
+          if (settings.enabled && !wasEnabled) initialScan();
         }
       });
     } catch (e) { /* storage unavailable — keep defaults */ }
@@ -188,6 +187,99 @@
       /^follow$/i.test(v) ||
       /^x$/i.test(v)
     );
+  }
+
+  // Cheap, layout-free signal that this subtree links back to the source
+  // tweet — used to recognize lightweight preview cards that don't carry
+  // profile stats (joined/followers) the way a full hover-card would.
+  function hasTwitterLink(el) {
+    try {
+      return !!el.querySelector('a[href*="x.com/"], a[href*="twitter.com/"], a[href*="t.co/"]');
+    } catch {
+      return false;
+    }
+  }
+
+  // Locate the "link preview" card X/Axiom renders under a post that links
+  // to an external site (image + title/description + domain caption). It's
+  // identified structurally — a link to a NON-x.com/twitter.com host that
+  // also wraps (or sits within a couple of levels of) an <img> — so its text
+  // never gets treated as part of the tweet body, and its markup is never
+  // touched by the inline replacement. Layout-free (no innerText calls).
+  function findLinkPreviewBlock(cardEl) {
+    try {
+      const anchors = cardEl.querySelectorAll('a[href]');
+      for (const a of anchors) {
+        let host;
+        try { host = new URL(a.href, location.href).hostname.replace(/^www\./i, '').toLowerCase(); }
+        catch { continue; }
+        if (/(^|\.)(x\.com|twitter\.com|t\.co)$/i.test(host)) continue; // internal link, not a preview
+
+        let node = a;
+        for (let depth = 0; node && depth < 3 && node !== cardEl; depth++, node = node.parentElement) {
+          if (node.querySelector && node.querySelector('img')) return node;
+        }
+      }
+    } catch { /* ignore */ }
+    return null;
+  }
+
+  // Whitespace-insensitive comparison used only to MATCH a candidate text
+  // container against the extracted post body — tolerant of the exact
+  // newline placement differing between how el.innerText renders vs. how the
+  // line-based extraction reconstructs it (the real cause of multi-paragraph
+  // posts failing to match).
+  function normalizeForMatch(s) {
+    return (s || '').replace(/\s+/g, ' ').trim();
+  }
+
+  // True if this subtree contains any media — img/video/picture. Used both
+  // to keep media lines out of the extracted post text, and (in
+  // findTextContainer) to categorically refuse to select a container that
+  // wraps media: replacing its innerHTML would destroy the photo/video.
+  function containsMedia(node) {
+    try {
+      return !!node.querySelector('img, video, picture, source');
+    } catch {
+      return false;
+    }
+  }
+
+  // The nearest ancestor of a media element that looks like its own
+  // "attachment slot" (a real rendered box, not the whole card) — used only
+  // to read the SURROUNDING caption-ish text for exclusion, never as a
+  // replacement target.
+  function findMediaWrapper(mediaEl, cardEl) {
+    let node = mediaEl;
+    for (let depth = 0; node && depth < 4 && node !== cardEl; depth++, node = node.parentElement) {
+      let rect;
+      try { rect = node.getBoundingClientRect(); } catch { break; }
+      if (rect && rect.width > 40 && rect.height > 40) return node;
+    }
+    return mediaEl.parentElement || mediaEl;
+  }
+
+  // Collect every line of text that belongs to a media attachment: an
+  // <img>'s alt text (which can surface in innerText for a broken/hidden
+  // image even though the user never wrote it) plus whatever text sits in
+  // that attachment's own wrapper (captions, "Photo by …", domain chips on a
+  // video thumbnail, etc.). These must never be treated as tweet body text.
+  function collectMediaLines(cardEl) {
+    const lines = new Set();
+    let media;
+    try { media = cardEl.querySelectorAll('img, video, picture'); } catch { return lines; }
+
+    const seenWrappers = new Set();
+    media.forEach((m) => {
+      const alt = (m.getAttribute && m.getAttribute('alt')) || '';
+      alt.split('\n').forEach((l) => { const v = l.trim(); if (v) lines.add(v); });
+
+      const wrapper = findMediaWrapper(m, cardEl);
+      if (seenWrappers.has(wrapper)) return;
+      seenWrappers.add(wrapper);
+      safeText(wrapper).split('\n').forEach((l) => { const v = l.trim(); if (v) lines.add(v); });
+    });
+    return lines;
   }
 
   // Read the REAL anchors from the original card DOM so we can keep their true
@@ -363,7 +455,10 @@
         /\b\d{4}\b/.test(line)
       ) || '';
 
-    const looksLikeCard = !!handle && (!!joined || !!followers);
+    // Full profile hover-cards carry joined/followers; lightweight preview
+    // tooltips (e.g. a chart-point popup) often only carry the handle plus a
+    // link back to the source tweet — both count as "looks like a card".
+    const looksLikeCard = !!handle && (!!joined || !!followers || hasTwitterLink(el));
     if (!looksLikeCard) return null;
 
     const filtered = lines.filter(line => {
@@ -387,11 +482,27 @@
     const quoted = detectQuoted(el, lines, handle);
     const quotedSet = quoted ? quoted.quotedSet : new Set();
 
+    // A link-preview card (image + title/description + domain caption) is a
+    // SIBLING block, not part of the tweet body — its lines must be
+    // subtracted the same way quoted-post lines already are, otherwise they
+    // get mixed into postText and no DOM element's text will ever match it.
+    const previewEl = findLinkPreviewBlock(el);
+    const previewLines = previewEl
+      ? new Set(safeText(previewEl).split('\n').map(s => s.trim()).filter(Boolean))
+      : new Set();
+
+    // Photos/videos attached to the post (not just link-preview cards) can
+    // also leak their alt text / caption into the card's flattened innerText
+    // — those lines belong to the attachment, never to the tweet body.
+    const mediaLines = collectMediaLines(el);
+
     const postLines = filtered
       .slice(1)
       .filter(line => !isGarbageMetricLine(line))
       .filter(line => !isBlockedUiLine(line))
       .filter(line => !quotedSet.has(line))
+      .filter(line => !previewLines.has(line))
+      .filter(line => !mediaLines.has(line))
       // Drop adjacent duplicate lines (X often repeats truncated + full text).
       .filter((line, i, arr) => i === 0 || line !== arr[i - 1]);
 
@@ -418,7 +529,7 @@
       ? injectLinkMarkers(postText, links)
       : postText;
 
-    // Best-effort permalink to the original post (for "Open original post").
+    // Best-effort permalink to the original post (kept for debugging/logging).
     let sourceUrl = '';
     try {
       const statusLink = [...el.querySelectorAll('a[href]')]
@@ -437,6 +548,7 @@
       translationSource,
       links,
       sourceUrl,
+      previewEl,
       quoted: quoted
         ? {
             name: quoted.name,
@@ -453,11 +565,16 @@
   // Find the smallest element inside the card whose own text fully contains
   // the extracted post body — that's the actual text node to replace
   // in-place, leaving the header/handle/metrics/buttons around it untouched.
-  // If nothing matches confidently, return null (caller must skip rather
-  // than risk overwriting the wrong element).
-  function findTextContainer(cardEl, postText) {
+  // A candidate that wraps ANY media (img/video/picture) or the detected
+  // link-preview block is categorically refused, even if its text matches —
+  // replacing its innerHTML would destroy that media. If no confident text
+  // match exists at all, falls back to a positional guess (the first
+  // substantial plain-text child after the header, before any media/footer
+  // child). If even that fails, returns null — the caller skips rather than
+  // risk overwriting the wrong element.
+  function findTextContainer(cardEl, postText, previewEl, handle) {
     if (!cardEl || !postText) return null;
-    const target = cleanText(postText);
+    const target = normalizeForMatch(postText);
     if (!target) return null;
 
     let best = null;
@@ -470,8 +587,12 @@
     }
 
     for (const node of nodes) {
-      let txt;
-      try { txt = cleanText(node.innerText || ''); } catch { continue; }
+      if (containsMedia(node)) continue; // never a valid replacement target
+      if (previewEl && (node === previewEl || node.contains(previewEl))) continue;
+
+      let raw;
+      try { raw = node.innerText || ''; } catch { continue; }
+      const txt = normalizeForMatch(raw);
       if (!txt || txt.length < target.length) continue;
       if (txt !== target && !txt.includes(target)) continue;
       if (txt.length < bestLen) {
@@ -480,7 +601,36 @@
       }
     }
 
-    return best;
+    if (best) return best;
+
+    return findTextContainerByPosition(cardEl, handle);
+  }
+
+  // Positional fallback: walk the card's DIRECT children in order, skip past
+  // whichever one contains the profile header (name/@handle/date), then
+  // return the first substantial plain-text sibling after it — stopping the
+  // moment a child with media/link-preview content is hit (that marks the
+  // footer/attachment boundary). Never touches media itself.
+  function findTextContainerByPosition(cardEl, handle) {
+    let children;
+    try { children = Array.from(cardEl.children || []); } catch { return null; }
+    if (!children.length) return null;
+
+    let headerIdx = -1;
+    for (let i = 0; i < children.length; i++) {
+      let txt;
+      try { txt = children[i].innerText || ''; } catch { continue; }
+      if (handle && txt.includes(handle)) { headerIdx = i; break; }
+    }
+
+    for (let i = headerIdx + 1; i < children.length; i++) {
+      const c = children[i];
+      if (containsMedia(c)) break; // hit the media/footer block — stop
+      let txt;
+      try { txt = cleanText(c.innerText || ''); } catch { continue; }
+      if (txt && txt.length >= 6) return c;
+    }
+    return null;
   }
 
   function translate(text) {
@@ -500,50 +650,52 @@
     });
   }
 
-  // Only inspects the small stack of elements actually under the cursor
-  // (via elementsFromPoint), never the whole document — avoids the
-  // full-page querySelectorAll + getBoundingClientRect/innerText scan that
-  // caused layout thrashing on pages with heavy DOM churn (live charts).
-  function findActiveCard() {
-    if (mouseX < 0 || mouseY < 0) return null;
+  // Climb from an arbitrary DOM node (e.g. one that just got mounted by a
+  // mutation) looking for an ancestor that parses as a tweet card. This is
+  // how a chart-point tooltip gets picked up even though it renders far away
+  // from the element the mutation actually touched.
+  function resolveCardFrom(startEl) {
+    let node = startEl;
+    for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
+      if (!(node instanceof Element)) continue;
+      let rect;
+      try { rect = node.getBoundingClientRect(); } catch { continue; }
+      if (!rect || rect.width < 220 || rect.height < 180) continue;
 
-    const stack = document.elementsFromPoint(mouseX, mouseY);
-    let best = null;
-    let bestArea = 0;
-
-    for (const el of stack) {
-      try {
-        if (!el) continue;
-
-        let node = el;
-        for (let depth = 0; node && depth < 6; depth++, node = node.parentElement) {
-          const rect = node.getBoundingClientRect();
-          if (!rect || rect.width < 220 || rect.height < 180) continue;
-
-          const parsed = parseCard(node);
-          if (!parsed) continue;
-
-          const area = rect.width * rect.height;
-          if (Number.isFinite(area) && area > bestArea) {
-            best = { el: node, parsed };
-            bestArea = area;
-          }
-          break; // first plausible card on this branch is enough
-        }
-      } catch (e) {
-        continue;
-      }
+      const parsed = parseCard(node);
+      if (parsed) return { el: node, parsed };
     }
-
-    return best;
+    return null;
   }
 
   // Replace one text container's content in place with the translated HTML,
-  // preserving paragraph breaks and clickable links/tags.
-  function applyInlineTranslation(container, data, translatedText) {
+  // preserving paragraph breaks and clickable links/tags. findTextContainer
+  // already refuses candidates that wrap media/preview content, but as a
+  // last-resort safety net: if a preview block still ends up INSIDE this
+  // container, it's detached before the innerHTML swap and reattached
+  // afterwards — never cloned, so its own DOM/state is preserved intact.
+  function applyInlineTranslation(container, data, translatedText, previewEl) {
+    const preservedPreview =
+      previewEl && previewEl !== container && container.contains(previewEl)
+        ? previewEl
+        : null;
+    if (preservedPreview) preservedPreview.remove();
+
     container.dataset.originalText = data.postText;
     container.dataset.translated = 'true';
     container.innerHTML = buildInlineHtml(translatedText, data.links || []);
+
+    if (preservedPreview) container.appendChild(preservedPreview);
+  }
+
+  // Races a translate() call against a client-side timeout so a hung message
+  // channel (e.g. extension context torn down mid-request) can never leave a
+  // container permanently stuck in the "pending" state.
+  function translateWithTimeout(text, ms = 10000) {
+    return Promise.race([
+      translate(text),
+      new Promise((resolve) => setTimeout(() => resolve({ ok: false, error: 'client_timeout' }), ms))
+    ]);
   }
 
   // Translate + replace in place for one card. Guarded so the SAME container
@@ -552,6 +704,14 @@
   // isn't hammered right after a failure (dataset.axiomFailedAt cooldown).
   async function translateContainer(cardEl, container, parsed) {
     if (!container || !document.body.contains(container)) return;
+
+    // Strict media-preservation guard: findTextContainer already refuses
+    // media-wrapping candidates, but never inject into one regardless of how
+    // `container` got here.
+    if (containsMedia(container)) {
+      console.warn(`${LOG} refused to translate — container wraps media:`, container);
+      return;
+    }
 
     if (container.dataset.translated === 'true' &&
         container.dataset.originalText === parsed.postText) {
@@ -565,115 +725,130 @@
     container.dataset.axiomPending = 'true';
 
     try {
-      const result = await translate(parsed.translationSource || parsed.postText);
+      const result = await translateWithTimeout(parsed.translationSource || parsed.postText);
       if (!document.body.contains(container)) return;
 
       if (!result?.ok) {
         if (result?.reason !== 'empty_source_text') {
-          console.error('[AXIOM-RU][TRANSLATION] failed:', result?.error || 'unknown');
+          console.error(`${LOG} translation failed:`, result?.error || 'unknown');
           container.dataset.axiomFailedAt = String(Date.now());
         }
         return;
       }
 
-      applyInlineTranslation(container, parsed, result.translatedText);
+      applyInlineTranslation(container, parsed, result.translatedText, parsed.previewEl);
+      console.log(`${LOG} translated & inserted:`, result.translatedText.slice(0, 80));
 
       // Translate the nested quoted/reply post separately and replace its
       // own text container in place (its header/handle stays untouched —
       // Axiom already renders that natively).
       if (parsed.quoted) {
-        const qres = await translate(parsed.quoted.translationSource || parsed.quoted.postText);
+        const qres = await translateWithTimeout(parsed.quoted.translationSource || parsed.quoted.postText);
         if (qres?.ok && document.body.contains(cardEl)) {
           const quoteContainer = findQuoteContainer(cardEl, parsed.quoted.handle);
           const quoteTextEl = quoteContainer
-            ? (findTextContainer(quoteContainer, parsed.quoted.postText) || quoteContainer)
+            ? (findTextContainer(quoteContainer, parsed.quoted.postText, null, parsed.quoted.handle) || quoteContainer)
             : null;
-          if (quoteTextEl && quoteTextEl !== container) {
+          if (quoteTextEl && quoteTextEl !== container && !containsMedia(quoteTextEl)) {
             applyInlineTranslation(quoteTextEl, parsed.quoted, qres.translatedText);
           }
         }
       }
-
-      // Persist last translation for the popup's copy/open actions.
-      try {
-        chrome.storage.local.set({
-          [LAST_KEY]: {
-            original: parsed.postText,
-            translated: result.translatedText,
-            sourceUrl: parsed.sourceUrl || '',
-            at: Date.now()
-          }
-        });
-      } catch { /* storage unavailable */ }
     } catch (e) {
-      console.error('[AXIOM-RU] translateContainer error:', e);
+      console.error(`${LOG} translateContainer error:`, e);
     } finally {
       container.dataset.axiomPending = 'false';
     }
   }
 
-  async function syncInline() {
-    try {
-      if (!settings.autoTranslate) return;
+  function handleCard(cardEl, parsed) {
+    console.log(`${LOG} Extracted text:`, parsed.postText);
 
-      const found = findActiveCard();
-      if (!found || !found.el || !document.body.contains(found.el)) return;
+    const textContainer = findTextContainer(cardEl, parsed.postText, parsed.previewEl, parsed.handle);
+    if (!textContainer) {
+      // Not a hard failure — a still-mounting DOM (e.g. the link preview
+      // hasn't loaded yet) can legitimately not match on this pass. No
+      // dataset flags are set here, so the next MutationObserver batch is
+      // free to retry without any cooldown.
+      console.warn(`${LOG} text container not found for extracted text:`, parsed.postText);
+      return;
+    }
 
-      const { el, parsed } = found;
+    if (textContainer.dataset.translated === 'true' &&
+        textContainer.dataset.originalText === parsed.postText) {
+      return;
+    }
 
-      const textContainer = findTextContainer(el, parsed.postText);
-      if (!textContainer) return; // can't confidently locate the text — skip, never guess
+    translateContainer(cardEl, textContainer, parsed);
+  }
 
-      if (textContainer.dataset.translated === 'true' &&
-          textContainer.dataset.originalText === parsed.postText) {
-        return;
-      }
+  // ── Mutation-driven detection ────────────────────────────────────────────
+  // Cards/tooltips can mount anywhere in the DOM (e.g. a chart-point tooltip
+  // rendered far from the cursor), so we react to WHAT GOT MOUNTED rather
+  // than to cursor position. Only the delta (added/changed nodes) is
+  // inspected — never a full-document rescan — so this stays cheap even on
+  // a page with constantly-updating charts.
+  let pendingRoots = new Set();
+  let scanTimer = null;
 
-      const now = Date.now();
-      // Short debounce so quickly sweeping over posts doesn't fire many
-      // translations, but hovering still feels immediate.
-      if (now - lastSentAt < 130) return;
-      lastSentAt = now;
+  function queueRoots(nodes) {
+    for (const n of nodes) {
+      if (n && n.nodeType === 1) pendingRoots.add(n);
+    }
+    clearTimeout(scanTimer);
+    scanTimer = setTimeout(flushRoots, 120);
+  }
 
-      translateContainer(el, textContainer, parsed);
-    } catch (e) {
-      console.error('[AXIOM-RU] syncInline error:', e);
+  function flushRoots() {
+    if (!settings.enabled) { pendingRoots.clear(); return; }
+    const roots = pendingRoots;
+    pendingRoots = new Set();
+    for (const root of roots) {
+      if (!document.body.contains(root)) continue;
+      const found = resolveCardFrom(root);
+      if (!found) continue;
+      handleCard(found.el, found.parsed);
     }
   }
 
-  function scheduleSync(delay = 120) {
-    clearTimeout(syncTimer);
-    syncTimer = setTimeout(syncInline, delay);
+  // Catches everything already on screen when the content script starts
+  // (or right after the translator is switched back on) — mutation-based
+  // detection alone would miss cards that were never mounted while we were
+  // watching.
+  function initialScan() {
+    if (!settings.enabled) return;
+    let nodes;
+    try {
+      nodes = document.querySelectorAll('div, section, article');
+    } catch {
+      return;
+    }
+    console.log(`${LOG} initial scan:`, nodes.length, 'candidate nodes');
+    for (const n of nodes) {
+      const parsed = parseCard(n);
+      if (parsed) handleCard(n, parsed);
+    }
   }
 
-  const observer = new MutationObserver(() => {
-    if (!settings.autoTranslate) return;
-    scheduleSync(120);
+  const observer = new MutationObserver((mutations) => {
+    if (!settings.enabled) return;
+    const roots = [];
+    for (const m of mutations) {
+      if (m.type === 'childList') {
+        m.addedNodes.forEach((n) => roots.push(n));
+        if (m.target) roots.push(m.target);
+      } else if (m.type === 'characterData') {
+        if (m.target && m.target.parentElement) roots.push(m.target.parentElement);
+      }
+    }
+    if (roots.length) queueRoots(roots);
   });
 
   observer.observe(document.body, {
     childList: true,
     subtree: true,
-    characterData: false
-  });
-
-  window.addEventListener('mousemove', (e) => {
-    mouseX = e.clientX;
-    mouseY = e.clientY;
-    scheduleSync(60);
-  }, { capture: true, passive: true });
-
-  window.addEventListener('scroll', () => {
-    scheduleSync(100);
-  }, { capture: true, passive: true });
-
-  window.addEventListener('resize', () => {
-    scheduleSync(100);
+    characterData: true
   });
 
   loadSettings();
-
-  setTimeout(() => {
-    syncInline();
-  }, 200);
 })();
