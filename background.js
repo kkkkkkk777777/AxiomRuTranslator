@@ -1,9 +1,14 @@
 // ── AXIOM RU — translation service worker ───────────────────────────────────
-// Real EN→RU translation. Default provider is Google's keyless web endpoint.
-// The local Argos/LibreTranslate path is OFF by default and only used if you
-// explicitly set CONFIG.enableLocalArgos = true (and re-add the host permission).
+// Real translation to the user's chosen target (RU or UK). Default provider
+// is Google's keyless web endpoint. The local Argos/LibreTranslate path is
+// OFF by default and only used if you explicitly set
+// CONFIG.enableLocalArgos = true (and re-add the host permission).
 
 const LOG = '[AXIOM-RU][PROVIDER]';
+
+// Every target language the extension's popup can select. Anything outside
+// this set (or a missing/malformed value) falls back to CONFIG.target.
+const SUPPORTED_TARGETS = new Set(['ru', 'uk']);
 
 const CONFIG = {
   // Default real provider. 'google' needs no API key.
@@ -166,8 +171,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   (async () => {
     const text = (message.text || '').trim();
-    // Target language from the request (EN/RU), validated with a safe default.
-    const target = message.target === 'en' ? 'en' : 'ru';
+    // Target language from the request (RU/UK/EN), validated with a safe default.
+    const target = SUPPORTED_TARGETS.has(message.target) ? message.target : CONFIG.target;
 
     if (!text) {
       console.warn('[AXIOM-RU][TRANSLATION] empty source text');

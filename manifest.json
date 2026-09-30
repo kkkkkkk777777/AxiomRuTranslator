@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Axiom Translator — RU/EN for X",
+  "name": "Axiom Translator — RU/UK for X",
   "version": "1.0.0",
-  "description": "Instantly translate X (Twitter) posts on Axiom into Russian or English right inside the post itself — with links and quoted replies preserved.",
+  "description": "Instantly translate X (Twitter) posts on Axiom into Russian or Ukrainian right inside the post itself — with clickable links preserved.",
   "permissions": ["activeTab", "storage"],
   "host_permissions": [
     "https://axiom.trade/*",

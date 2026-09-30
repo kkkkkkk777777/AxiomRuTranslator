@@ -6,7 +6,7 @@ const SETTINGS_KEY = 'axiomRuSettings';
 const DEFAULTS = {
   enabled: true,      // master on/off switch
   preserveLinks: true,
-  uiLang: 'ru'          // ru | en — UI language (also the translation target)
+  targetLang: 'ru'     // ru | uk — translation target (also the popup's UI language)
 };
 
 // UI label translations. Keys map to [data-i18n] attributes in popup.html.
@@ -28,16 +28,27 @@ const I18N = {
     preserveTitle: 'Сохранять ссылки',
     preserveSub: 'Оставлять реальные ссылки кликабельными',
     language: 'Язык'
+  },
+  uk: {
+    statusActive: 'Активний',
+    statusOff: 'На паузі',
+    enabledTitle: 'Перекладач',
+    enabledSub: 'Автоматично перекладати пости',
+    preserveTitle: 'Зберігати посилання',
+    preserveSub: 'Залишати реальні посилання клікабельними',
+    language: 'Мова'
   }
 };
 
 function t(key) {
-  const lang = I18N[settings.uiLang] ? settings.uiLang : 'en';
+  // Only EN/RU popup UI text exists — a target of 'uk' falls back to the
+  // English labels automatically.
+  const lang = I18N[settings.targetLang] ? settings.targetLang : 'en';
   return (I18N[lang] && I18N[lang][key]) || (I18N.en[key] || key);
 }
 
 function applyI18n() {
-  document.documentElement.lang = settings.uiLang || 'en';
+  document.documentElement.lang = settings.targetLang || 'en';
   document.querySelectorAll('[data-i18n]').forEach((el) => {
     const key = el.dataset.i18n;
     const val = t(key);
@@ -80,6 +91,26 @@ function loadSettings() {
 function saveSettings() {
   writeCachedSettings(settings);
   chrome.storage.sync.set({ [SETTINGS_KEY]: settings });
+  notifyActiveTab();
+}
+
+// chrome.storage.onChanged already propagates to content scripts, but it can
+// lag (sync storage round-trips through Chrome's own sync backend). Push the
+// change straight to the active tab too so a language switch is picked up
+// immediately instead of "being ignored" until that event eventually fires.
+function notifyActiveTab() {
+  try {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const tab = tabs && tabs[0];
+      if (!tab || tab.id == null) return;
+      chrome.tabs.sendMessage(tab.id, { type: 'SETTINGS_CHANGED', settings }, () => {
+        // No content script on this tab (e.g. not an axiom.trade page) —
+        // storage.onChanged still covers tabs that do have one. Read
+        // lastError so Chrome doesn't log an unhandled-rejection warning.
+        void chrome.runtime.lastError;
+      });
+    });
+  } catch { /* tabs API unavailable — non-fatal */ }
 }
 
 // ── UI wiring ────────────────────────────────────────────────────────────────

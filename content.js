@@ -4,14 +4,35 @@
 
   const LOG = '[Axiom Translator]';
 
+  // Set once chrome.runtime is confirmed invalidated (extension reloaded/
+  // updated while this content script is still running on an old page).
+  // From that point on there is nothing useful this script can do — every
+  // chrome.* call is dead — so all further observer/scan activity stops
+  // instead of retrying forever and flooding the console.
+  let contextInvalidated = false;
+
   // ── User settings (persisted by the popup UI via chrome.storage.sync) ──────
   const SETTINGS_KEY = 'axiomRuSettings';
   const DEFAULT_SETTINGS = {
     enabled: true,      // master on/off switch
     preserveLinks: true,
-    uiLang: 'ru'         // ru | en — translation target
+    targetLang: 'ru'     // ru | uk — translation target
   };
   let settings = { ...DEFAULT_SETTINGS };
+
+  // Shared by both propagation paths below (storage.onChanged and the
+  // popup's direct SETTINGS_CHANGED message) so turning the translator back
+  // on, or switching the target language, always catches up on whatever is
+  // already on screen — not just newly-mounted cards (handleCard's own guard
+  // already makes this a no-op for cards that are already in the right
+  // language).
+  function applySettingsUpdate(next) {
+    const prev = settings;
+    settings = { ...DEFAULT_SETTINGS, ...next };
+    const turnedOn = settings.enabled && !prev.enabled;
+    const langChanged = settings.targetLang !== prev.targetLang;
+    if (settings.enabled && (turnedOn || langChanged)) initialScan();
+  }
 
   function loadSettings() {
     try {
@@ -21,11 +42,15 @@
       });
       chrome.storage.onChanged.addListener((changes, area) => {
         if (area === 'sync' && changes[SETTINGS_KEY]) {
-          const wasEnabled = settings.enabled;
-          settings = { ...DEFAULT_SETTINGS, ...changes[SETTINGS_KEY].newValue };
-          // Turning the translator back on should catch up on whatever is
-          // already on screen, not just newly-mounted cards.
-          if (settings.enabled && !wasEnabled) initialScan();
+          applySettingsUpdate(changes[SETTINGS_KEY].newValue);
+        }
+      });
+      // The popup also pushes changes directly to the active tab (faster
+      // than waiting on chrome.storage.sync's own round-trip) — see
+      // notifyActiveTab() in popup.js.
+      chrome.runtime.onMessage.addListener((message) => {
+        if (message && message.type === 'SETTINGS_CHANGED') {
+          applySettingsUpdate(message.settings || {});
         }
       });
     } catch (e) { /* storage unavailable — keep defaults */ }
@@ -110,9 +135,44 @@
   // Build the translated HTML. Translated {{i}} markers are replaced with real
   // anchors using the ORIGINAL post's href (links[i].href). If no real href
   // exists, the display text is rendered as plain text (never a fake link).
+  // Google Translate doesn't reliably preserve {{i}} marker pairs — a short
+  // or repeated link's text (e.g. "fud", "unipics" appearing more than
+  // once) is especially prone to the translated output dropping one of the
+  // pair, or moving markers out of their original relative order. When that
+  // happens, the lazy {{i}}...{{i}} regex in buildBodyHtml can match across
+  // a huge unintended span (everything between an early {{0}} and an
+  // unrelated, later {{0}}), turning the whole translated paragraph into
+  // one giant link. This checks BOTH that every marker found a real pair,
+  // AND that no matched span is wildly longer than the original link text
+  // it's supposed to wrap.
+  function markersLookValid(text, links) {
+    const allMarkers = text.match(/\{\{\d+\}\}/g) || [];
+    if (allMarkers.length === 0) return true;
+    if (allMarkers.length % 2 !== 0) return false;
+
+    const pairRe = /\{\{(\d+)\}\}([\s\S]*?)\{\{\1\}\}/g;
+    let matchedCount = 0;
+    let m;
+    while ((m = pairRe.exec(text)) !== null) {
+      matchedCount++;
+      const link = links && links[Number(m[1])];
+      const expectedLen = link && link.text ? link.text.length : 0;
+      if (expectedLen && m[2].length > Math.max(40, expectedLen * 4)) return false;
+    }
+    return matchedCount * 2 === allMarkers.length;
+  }
+
   function buildBodyHtml(text, links) {
     const esc = escapeHtml(formatTranslatedText(text || ''));
     const re = /\{\{(\d+)\}\}([\s\S]*?)\{\{\1\}\}/g;
+
+    // Markers didn't survive translation intact — strip them and fall back
+    // to plain text (still linkifying bare http(s) URLs if links are on)
+    // rather than risk building one wrongly-spanning giant link.
+    if (!markersLookValid(esc, links)) {
+      const stripped = esc.replace(/\{\{\d+\}\}/g, '');
+      return settings.preserveLinks ? linkifyPlainUrls(stripped) : stripped;
+    }
 
     // "Preserve original links" OFF → strip markers, render everything as text.
     if (!settings.preserveLinks) {
@@ -176,6 +236,11 @@
       /^show less$/i.test(v) ||
       /^translate post$/i.test(v) ||
       /^translate$/i.test(v) ||
+      /^translate tweet$/i.test(v) ||
+      /^hide translation$/i.test(v) ||
+      /^show translation$/i.test(v) ||
+      /^view translation$/i.test(v) ||
+      /^translated from /i.test(v) ||
       /^copy link$/i.test(v) ||
       /^share$/i.test(v) ||
       /^view post$/i.test(v) ||
@@ -189,6 +254,40 @@
     );
   }
 
+  // X's own "Translate post / Hide Translation" toggle can expand a full
+  // machine translation directly below the original text. Once expanded,
+  // the card's flattened text contains the original, THIS label, and the
+  // translated duplicate all run together — no single DOM node wraps all
+  // three, so this label is used as a hard cutoff wherever it's found: only
+  // the text BEFORE it (the original, primary block) is the real post.
+  function isTranslateToggleLine(line) {
+    const v = line.trim();
+    return (
+      /^translate post$/i.test(v) ||
+      /^translate tweet$/i.test(v) ||
+      /^translate$/i.test(v) ||
+      /^hide translation$/i.test(v) ||
+      /^show translation$/i.test(v) ||
+      /^view translation$/i.test(v) ||
+      /^translated from /i.test(v)
+    );
+  }
+
+  // A genuine display name is short and name-shaped, not a full sentence.
+  // Lightweight preview cards (e.g. a chart-point tooltip) sometimes have NO
+  // separate name line at all — without this check, "first remaining line
+  // after handle/date" would silently swallow the tweet's own opening
+  // sentence as if it were the author's name, permanently dropping it from
+  // postText (and everything downstream: translation source, container
+  // matching, all missing that first sentence).
+  function looksLikeDisplayName(line) {
+    const v = (line || '').trim();
+    if (!v || v.length > 50) return false;
+    const wordCount = v.split(/\s+/).length;
+    if (wordCount > 6 && /[.!?]$/.test(v)) return false; // reads like a sentence
+    return true;
+  }
+
   // Cheap, layout-free signal that this subtree links back to the source
   // tweet — used to recognize lightweight preview cards that don't carry
   // profile stats (joined/followers) the way a full hover-card would.
@@ -198,6 +297,40 @@
     } catch {
       return false;
     }
+  }
+
+  // Table rows, holder/trader lists, and other grid-based UI must NEVER be
+  // treated as a tweet card — even a row tagging a wallet with its @handle
+  // and a link to their X profile has both signals hasTwitterLink() looks
+  // for. Cheap: a single closest() walk, no layout/innerText cost.
+  function isInsideTableOrList(el) {
+    try {
+      return !!el.closest(
+        'table, thead, tbody, tfoot, tr, td, th, ' +
+        '[role="row"], [role="rowgroup"], [role="grid"], [role="table"], ' +
+        '[role="list"], [role="listbox"], [role="listitem"], ul, ol'
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  // A genuine tweet hover-card/tooltip is rendered as a floating overlay —
+  // fixed or absolutely positioned, lifted out of normal page flow. A trade
+  // row, holder row, or pulse-list entry is always static/relative, no
+  // matter how it's marked up (many dashboards build rows from plain divs
+  // with no table/list semantics at all, so this position check — not
+  // isInsideTableOrList — is the real discriminator). Checked on the element
+  // itself and a few ancestors, since the position is sometimes set on a
+  // portal wrapper one level up rather than the card element directly.
+  function looksLikeOverlay(el) {
+    let node = el;
+    for (let depth = 0; node && depth < 4; depth++, node = node.parentElement) {
+      let style;
+      try { style = getComputedStyle(node); } catch { continue; }
+      if (style.position === 'fixed' || style.position === 'absolute') return true;
+    }
+    return false;
   }
 
   // Locate the "link preview" card X/Axiom renders under a post that links
@@ -224,18 +357,43 @@
     return null;
   }
 
-  // Whitespace-insensitive comparison used only to MATCH a candidate text
-  // container against the extracted post body — tolerant of the exact
-  // newline placement differing between how el.innerText renders vs. how the
-  // line-based extraction reconstructs it (the real cause of multi-paragraph
-  // posts failing to match).
-  function normalizeForMatch(s) {
-    return (s || '').replace(/\s+/g, ' ').trim();
+  // Rich embedded cards (a screenshot-style AI-chat preview, a poll, any
+  // other "quote-like" sub-content) don't all fit the link-preview shape
+  // (external link + img) or the quoted-tweet shape (a second @handle).
+  // What they DO reliably have is their own visible border, setting them
+  // visually apart as a distinct box within the tweet — so that's used as a
+  // general-purpose signal instead of trying to recognize every possible
+  // kind of embed by its content. Picks the SMALLEST such bordered box that
+  // doesn't contain the main post's own handle (so it isn't just the
+  // header/card border itself).
+  function findEmbeddedCardBlock(cardEl, handle) {
+    let candidates;
+    try { candidates = cardEl.querySelectorAll('div, section, article'); } catch { return null; }
+
+    let best = null;
+    let bestArea = Infinity;
+    for (const c of candidates) {
+      let style;
+      try { style = getComputedStyle(c); } catch { continue; }
+      if (style.borderTopStyle === 'none' || style.borderTopWidth === '0px') continue;
+
+      let rect;
+      try { rect = c.getBoundingClientRect(); } catch { continue; }
+      if (!rect || rect.width < 150 || rect.height < 60) continue;
+
+      let txt;
+      try { txt = c.innerText || ''; } catch { continue; }
+      if (handle && txt.includes(handle)) continue; // wraps the header — not an embed
+
+      const area = rect.width * rect.height;
+      if (area < bestArea) { best = c; bestArea = area; }
+    }
+    return best;
   }
 
   // True if this subtree contains any media — img/video/picture. Used both
   // to keep media lines out of the extracted post text, and (in
-  // findTextContainer) to categorically refuse to select a container that
+  // findBodyContainer) to categorically refuse to select a container that
   // wraps media: replacing its innerHTML would destroy the photo/video.
   function containsMedia(node) {
     try {
@@ -314,9 +472,18 @@
   function injectLinkMarkers(source, links) {
     let src = source;
     // Longest text first so a short link can't match inside a longer one.
+    // Very short link text (cashtags like "$NI", 3-letter tickers, short
+    // repeated words) is excluded entirely — Google Translate is far more
+    // likely to drop or reorder ONE of a {{i}}...{{i}} pair when it's
+    // wrapped around just a couple of characters, which produces a
+    // corrupted/misplaced link (or, per markersLookValid, a silent fallback
+    // to no links at all for the WHOLE post). Left as plain, non-clickable
+    // text instead — losing that one link's clickability is far cheaper
+    // than either outcome.
+    const MIN_LINK_TEXT_LENGTH = 4;
     const ordered = links
       .map((l, i) => ({ text: l.text, i }))
-      .filter(l => l.text)
+      .filter(l => l.text && l.text.length >= MIN_LINK_TEXT_LENGTH)
       .sort((a, b) => b.text.length - a.text.length);
     for (const l of ordered) {
       const idx = src.indexOf(l.text);
@@ -351,7 +518,14 @@
   // Detect a nested quoted/reply post from the card's TEXT LINES (robust even
   // when Axiom flattens the embedded post — no reliance on specific wrappers).
   // Splits on a SECOND author @handle different from the main author.
-  function detectQuoted(el, lines, mainHandle) {
+  // Only returns what's actually still needed downstream: `handle` (to
+  // locate the quote's DOM container so it can be excluded from the main
+  // body search) and `quotedSet` (the lines to subtract from the main
+  // post). The quote itself is never translated (see handleCard), so the
+  // quoted post's own name/date/body/links are deliberately NOT extracted
+  // here anymore — that used to call findQuoteContainer + extractCardLinks +
+  // injectLinkMarkers for a result nothing read.
+  function detectQuoted(lines, mainHandle) {
     const handleRe = /^@[A-Za-z0-9_]{2,}$/;
     const mh = (mainHandle || '').toLowerCase();
 
@@ -364,54 +538,32 @@
 
     const qhandle = lines[hIdx];
 
-    // Quoted author name = the line just above the handle, if it's a real name.
-    let nameIdx = hIdx - 1;
-    let qname = '';
-    const cand = nameIdx >= 0 ? lines[nameIdx] : '';
-    if (
-      cand && !handleRe.test(cand) &&
+    // A real name line just above the handle pushes the quoted block's
+    // start (and thus quotedSet) one line earlier.
+    const cand = hIdx - 1 >= 0 ? lines[hIdx - 1] : '';
+    const hasQName =
+      !!cand && !handleRe.test(cand) &&
       !isGarbageMetricLine(cand) && !isBlockedUiLine(cand) &&
-      !/^Joined/i.test(cand) && !/followers/i.test(cand)
-    ) {
-      qname = cand;
-    } else {
-      nameIdx = hIdx; // no separate name line
-    }
+      !/^Joined/i.test(cand) && !/followers/i.test(cand);
+    const startIdx = hasQName ? hIdx - 1 : hIdx;
 
-    const startIdx = qname ? nameIdx : hIdx; // where the quoted block begins
-    const qdate = lines.slice(hIdx).find(l =>
-      /^\d+[smhd]$/i.test(l) || /\bAM\b|\bPM\b/.test(l) || /\b\d{4}\b/.test(l)) || '';
-
-    const qbody = lines.slice(hIdx + 1).filter(l => {
-      if (l === qhandle || l === qname || l === qdate) return false;
-      if (handleRe.test(l)) return false;
-      if (/followers/i.test(l) || /^Joined/i.test(l) || /following/i.test(l)) return false;
-      if (isGarbageMetricLine(l) || isBlockedUiLine(l)) return false;
-      return true;
-    });
-
-    const qtext = cleanText(qbody.join('\n'));
-    // A standalone second author handle is a strong reply/quote signal, so we
-    // ALWAYS return a block (never merge these lines back into the main body).
-    // The body may be empty (header-only reply) — it still renders as a card.
-
-    const container = findQuoteContainer(el, qhandle);
-    const links = container ? extractCardLinks(container, qname, qhandle) : [];
-    const translationSource = links.length ? injectLinkMarkers(qtext, links) : qtext;
-
+    // A standalone second author handle is a strong reply/quote signal, so
+    // we ALWAYS return a block (never merge these lines back into the main
+    // body), even if the quoted body itself ends up empty.
     return {
-      name: qname || qhandle.replace('@', ''),
       handle: qhandle,
-      date: qdate,
-      postText: qtext,
-      translationSource,
-      links,
       quotedSet: new Set(lines.slice(startIdx)) // subtract these from main body
     };
   }
 
   function parseCard(el) {
     if (!el) return null;
+
+    // Structural + positional gate FIRST, before the expensive innerText
+    // read below — rejects the overwhelming majority of the page (table
+    // rows, holder/trader lists, pulse rows) with only cheap property reads.
+    if (isInsideTableOrList(el)) return null;
+    if (!looksLikeOverlay(el)) return null;
 
     const full = safeText(el);
     if (!full || full.length < 40) return null;
@@ -475,11 +627,17 @@
       return true;
     });
 
-    const name = filtered[0] || handle.replace('@', '') || '';
+    // Only treat filtered[0] as the author's display name if it actually
+    // looks like one — otherwise (no separate name line in this card's
+    // layout) it's really the start of the tweet body, and must stay in it.
+    const nameCandidate = filtered[0] || '';
+    const hasRealName = !!nameCandidate && looksLikeDisplayName(nameCandidate);
+    const name = hasRealName ? nameCandidate : (handle.replace('@', '') || '');
 
     // Detect a nested quoted/reply post so its text is subtracted from the
-    // main body (not flattened together) and translated as its own block.
-    const quoted = detectQuoted(el, lines, handle);
+    // main body instead of being flattened together with it. The quote
+    // itself is deliberately never translated — see handleCard.
+    const quoted = detectQuoted(lines, handle);
     const quotedSet = quoted ? quoted.quotedSet : new Set();
 
     // A link-preview card (image + title/description + domain caption) is a
@@ -491,17 +649,35 @@
       ? new Set(safeText(previewEl).split('\n').map(s => s.trim()).filter(Boolean))
       : new Set();
 
+    // A rich embedded card (AI-chat preview, poll, anything else with its
+    // own visible border) is a SEPARATE block too — same reasoning as the
+    // link-preview above, just recognized by its border instead of an
+    // img+link shape.
+    const embeddedCardEl = findEmbeddedCardBlock(el, handle);
+    const embeddedCardLines = embeddedCardEl
+      ? new Set(safeText(embeddedCardEl).split('\n').map(s => s.trim()).filter(Boolean))
+      : new Set();
+
     // Photos/videos attached to the post (not just link-preview cards) can
     // also leak their alt text / caption into the card's flattened innerText
     // — those lines belong to the attachment, never to the tweet body.
     const mediaLines = collectMediaLines(el);
 
-    const postLines = filtered
-      .slice(1)
+    // X's "Translate post"/"Hide Translation" toggle can render a full
+    // machine translation directly below the original — everything from
+    // that marker onward (the label itself AND the duplicate translated
+    // text after it) belongs to a SEPARATE block, not the primary post, so
+    // it's cut off here rather than left to contaminate postText.
+    const bodyCandidateLines = hasRealName ? filtered.slice(1) : filtered.slice(0);
+    const toggleIdx = bodyCandidateLines.findIndex(isTranslateToggleLine);
+    const bodyLines = toggleIdx === -1 ? bodyCandidateLines : bodyCandidateLines.slice(0, toggleIdx);
+
+    const postLines = bodyLines
       .filter(line => !isGarbageMetricLine(line))
       .filter(line => !isBlockedUiLine(line))
       .filter(line => !quotedSet.has(line))
       .filter(line => !previewLines.has(line))
+      .filter(line => !embeddedCardLines.has(line))
       .filter(line => !mediaLines.has(line))
       // Drop adjacent duplicate lines (X often repeats truncated + full text).
       .filter((line, i, arr) => i === 0 || line !== arr[i - 1]);
@@ -529,125 +705,178 @@
       ? injectLinkMarkers(postText, links)
       : postText;
 
-    // Best-effort permalink to the original post (kept for debugging/logging).
-    let sourceUrl = '';
-    try {
-      const statusLink = [...el.querySelectorAll('a[href]')]
-        .map(a => a.href)
-        .find(h => /(?:x\.com|twitter\.com)\/[^/]+\/status\/\d+/i.test(h));
-      sourceUrl = statusLink || '';
-    } catch { /* ignore */ }
-
+    // name/joined/followers/date only feed the filtering/detection logic
+    // above (and extractCardLinks' name/handle exclusion) — nothing reads
+    // them off the returned object, so they aren't included in it.
     return {
-      name,
       handle,
-      joined,
-      followers,
-      date,
       postText,
       translationSource,
       links,
-      sourceUrl,
       previewEl,
-      quoted: quoted
-        ? {
-            name: quoted.name,
-            handle: quoted.handle,
-            date: quoted.date,
-            postText: quoted.postText,
-            translationSource: quoted.translationSource,
-            links: quoted.links
-          }
-        : null
+      embeddedCardEl,
+      quoted: quoted ? { handle: quoted.handle } : null
     };
   }
 
-  // Find the smallest element inside the card whose own text fully contains
-  // the extracted post body — that's the actual text node to replace
-  // in-place, leaving the header/handle/metrics/buttons around it untouched.
-  // A candidate that wraps ANY media (img/video/picture) or the detected
-  // link-preview block is categorically refused, even if its text matches —
-  // replacing its innerHTML would destroy that media. If no confident text
-  // match exists at all, falls back to a positional guess (the first
-  // substantial plain-text child after the header, before any media/footer
-  // child). If even that fails, returns null — the caller skips rather than
-  // risk overwriting the wrong element.
-  function findTextContainer(cardEl, postText, previewEl, handle) {
-    if (!cardEl || !postText) return null;
-    const target = normalizeForMatch(postText);
-    if (!target) return null;
-
+  // The smallest element inside `cardEl` whose text includes `handle` — the
+  // header/identity row (avatar + display name + @handle + timestamp),
+  // however deeply it's actually nested. Used to build an exclusion zone so
+  // no translation target can ever BE it, be INSIDE it, or WRAP it.
+  function findHeaderBlock(cardEl, handle) {
+    if (!handle) return null;
     let best = null;
     let bestLen = Infinity;
     let nodes;
-    try {
-      nodes = cardEl.querySelectorAll('*');
-    } catch {
-      return null;
-    }
-
+    try { nodes = cardEl.querySelectorAll('*'); } catch { return null; }
     for (const node of nodes) {
-      if (containsMedia(node)) continue; // never a valid replacement target
-      if (previewEl && (node === previewEl || node.contains(previewEl))) continue;
-
-      let raw;
-      try { raw = node.innerText || ''; } catch { continue; }
-      const txt = normalizeForMatch(raw);
-      if (!txt || txt.length < target.length) continue;
-      if (txt !== target && !txt.includes(target)) continue;
-      if (txt.length < bestLen) {
-        best = node;
-        bestLen = txt.length;
-      }
+      let txt;
+      try { txt = node.innerText || ''; } catch { continue; }
+      if (!txt || !txt.includes(handle)) continue;
+      if (txt.length < bestLen) { best = node; bestLen = txt.length; }
     }
-
-    if (best) return best;
-
-    return findTextContainerByPosition(cardEl, handle);
+    return best;
   }
 
-  // Positional fallback: walk the card's DIRECT children in order, skip past
-  // whichever one contains the profile header (name/@handle/date), then
-  // return the first substantial plain-text sibling after it — stopping the
-  // moment a child with media/link-preview content is hit (that marks the
-  // footer/attachment boundary). Never touches media itself.
-  function findTextContainerByPosition(cardEl, handle) {
-    let children;
-    try { children = Array.from(cardEl.children || []); } catch { return null; }
-    if (!children.length) return null;
+  // containsMedia only catches an actual <img>/<video>/<picture> tag. Many
+  // sites render avatars as a plain <div> with a CSS background-image
+  // instead (lazy-loading/placeholder technique) — invisible to
+  // containsMedia, so a node bundling one of THOSE next to some text could
+  // still slip through as a false "body" candidate. Small (<=80px) elements
+  // with a background-image are treated the same way as a real <img>.
+  function hasCssAvatar(node) {
+    try {
+      let els;
+      try { els = node.querySelectorAll('*'); } catch { return false; }
+      for (const el of els) {
+        let bg;
+        try { bg = getComputedStyle(el).backgroundImage; } catch { continue; }
+        if (!bg || bg === 'none') continue;
+        const r = el.getBoundingClientRect();
+        if (r && r.width > 0 && r.width <= 80 && r.height <= 80) return true;
+      }
+    } catch { /* ignore */ }
+    return false;
+  }
 
-    let headerIdx = -1;
-    for (let i = 0; i < children.length; i++) {
-      let txt;
-      try { txt = children[i].innerText || ''; } catch { continue; }
-      if (handle && txt.includes(handle)) { headerIdx = i; break; }
+  // A "leafy" text node: its only element children (if any) are inline
+  // formatting tags. A real paragraph of post text has this shape. A header
+  // row (avatar + name/handle/time) or a quote box needs actual BLOCK
+  // children (a wrapper div around an <img>, a nested card structure) to
+  // exist at all — so requiring this shape is a STRUCTURAL guarantee that we
+  // can never select (and therefore never blow away with innerHTML=) a node
+  // that bundles the header or the quote card, independent of whether the
+  // separate handle/avatar-based exclusion checks below happen to catch it
+  // for this specific card's markup.
+  const INLINE_TAGS = new Set([
+    'A', 'SPAN', 'B', 'I', 'STRONG', 'EM', 'BR', 'U', 'MARK', 'SMALL', 'SUB', 'SUP', 'CODE'
+  ]);
+  function isLeafyTextNode(node) {
+    for (const child of node.children) {
+      if (!INLINE_TAGS.has(child.tagName)) return false;
+    }
+    return true;
+  }
+
+  // Find the tweet BODY container directly via DOM structure — never by
+  // matching a reconstructed text string. The smallest LEAFY element (see
+  // isLeafyTextNode) in `cardEl` that is none of: the header/identity row,
+  // media (img/video/picture), the link-preview block, an explicitly
+  // excluded sub-container (e.g. the nested quote card, when locating the
+  // MAIN body), or X's own Translate/Hide-Translation toggle — AND whose own
+  // text is at least roughly as long as the post we're about to insert. That
+  // length floor is what actually keeps this out of a name/handle/avatar
+  // cell: those are always short. Returns null rather than guessing if
+  // nothing qualifies — the caller skips that pass instead of risking the
+  // wrong element.
+  function findBodyContainer(cardEl, ctx) {
+    if (!cardEl) return null;
+    const handle = ctx.handle || '';
+    const previewEl = ctx.previewEl || null;
+    const exclude = ctx.excludeContainers || [];
+    const expectedLength = ctx.expectedLength || 0;
+
+    const headerEl = findHeaderBlock(cardEl, handle);
+    const minLen = Math.max(6, Math.floor(expectedLength * 0.5));
+
+    function isExcluded(node) {
+      if (containsMedia(node)) return true;
+      if (hasCssAvatar(node)) return true;
+      if (headerEl && (node === headerEl || headerEl.contains(node) || node.contains(headerEl))) return true;
+      if (previewEl && (node === previewEl || node.contains(previewEl) || previewEl.contains(node))) return true;
+      for (const ex of exclude) {
+        if (ex && (node === ex || ex.contains(node) || node.contains(ex))) return true;
+      }
+      let raw;
+      try { raw = node.innerText || ''; } catch { return true; }
+      if (raw.split('\n').some((l) => isTranslateToggleLine(l.trim()))) return true;
+      return false;
     }
 
-    for (let i = headerIdx + 1; i < children.length; i++) {
-      const c = children[i];
-      if (containsMedia(c)) break; // hit the media/footer block — stop
+    let nodes;
+    try { nodes = cardEl.querySelectorAll('*'); } catch { return null; }
+
+    // Smallest LEAFY, non-excluded element with text at least half as long
+    // as the expected post — naturally lands on the most specific body
+    // wrapper: any ancestor that ALSO wraps the header/media/quote either
+    // fails the leaf check (it has block children) or gets excluded above,
+    // and anything too short to plausibly BE the post (a name, handle,
+    // timestamp) fails the length floor.
+    let best = null;
+    let bestLen = Infinity;
+    for (const node of nodes) {
+      if (!isLeafyTextNode(node)) continue;
+      if (isExcluded(node)) continue;
       let txt;
-      try { txt = cleanText(c.innerText || ''); } catch { continue; }
-      if (txt && txt.length >= 6) return c;
+      try { txt = cleanText(node.innerText || ''); } catch { continue; }
+      if (!txt || txt.length < minLen) continue;
+      if (txt.length < bestLen) { best = node; bestLen = txt.length; }
     }
-    return null;
+    return best;
+  }
+
+  // Fires exactly once: logs a single clear notice (not a repeat per failed
+  // call) and permanently disconnects the MutationObserver plus any queued
+  // scan, so the script goes fully quiet instead of continuing to churn
+  // through translate attempts that can never succeed until the page reload.
+  function handleContextInvalidated() {
+    if (contextInvalidated) return;
+    contextInvalidated = true;
+    console.warn(`${LOG} Extension context invalidated — translation stopped. Please refresh this page to restore it.`);
+    try { observer.disconnect(); } catch { /* ignore */ }
+    clearTimeout(scanTimer);
+    pendingRoots.clear();
+  }
+
+  // A reloaded/updated extension leaves already-injected content scripts
+  // running with an INVALIDATED chrome.runtime — calling sendMessage on it
+  // throws "Cannot read properties of undefined (reading 'sendMessage')"
+  // instead of failing gracefully. Checking chrome.runtime.id first (it's
+  // undefined once invalidated) lets us fail fast with a clear message
+  // instead of throwing.
+  async function safeSendMessage(payload) {
+    if (!chrome?.runtime?.id || !chrome?.runtime?.sendMessage) {
+      handleContextInvalidated();
+      return { ok: false, error: 'context_invalidated' };
+    }
+    return new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage(payload, (response) => {
+          if (chrome.runtime.lastError) {
+            resolve({ ok: false, error: chrome.runtime.lastError.message });
+          } else {
+            resolve(response || { ok: false, error: 'no_response' });
+          }
+        });
+      } catch (err) {
+        resolve({ ok: false, error: err.message });
+      }
+    });
   }
 
   function translate(text) {
-    const target = settings.uiLang || 'ru';
-    return new Promise((resolve) => {
-      try {
-        chrome.runtime.sendMessage({ type: 'TRANSLATE_TEXT', text, target }, (response) => {
-          if (chrome.runtime.lastError) {
-            resolve({ ok: false, error: chrome.runtime.lastError.message });
-            return;
-          }
-          resolve(response || { ok: false, error: 'no_response' });
-        });
-      } catch (e) {
-        resolve({ ok: false, error: e.message || 'send_failed' });
-      }
-    });
+    const target = settings.targetLang || 'ru';
+    return safeSendMessage({ type: 'TRANSLATE_TEXT', text, target });
   }
 
   // Climb from an arbitrary DOM node (e.g. one that just got mounted by a
@@ -669,7 +898,7 @@
   }
 
   // Replace one text container's content in place with the translated HTML,
-  // preserving paragraph breaks and clickable links/tags. findTextContainer
+  // preserving paragraph breaks and clickable links/tags. findBodyContainer
   // already refuses candidates that wrap media/preview content, but as a
   // last-resort safety net: if a preview block still ends up INSIDE this
   // container, it's detached before the innerHTML swap and reattached
@@ -682,6 +911,11 @@
     if (preservedPreview) preservedPreview.remove();
 
     container.dataset.originalText = data.postText;
+    // The target language is part of the "already translated" fingerprint —
+    // without it, switching RU -> UK in the popup would leave every
+    // already-translated card stuck in the old language forever, since
+    // originalText alone would still match.
+    container.dataset.translatedLang = settings.targetLang;
     container.dataset.translated = 'true';
     container.innerHTML = buildInlineHtml(translatedText, data.links || []);
 
@@ -698,14 +932,18 @@
     ]);
   }
 
-  // Translate + replace in place for one card. Guarded so the SAME container
-  // is never translated twice for the same source text (dataset.translated),
-  // never has two requests in flight at once (dataset.axiomPending), and
-  // isn't hammered right after a failure (dataset.axiomFailedAt cooldown).
-  async function translateContainer(cardEl, container, parsed) {
+  // Translate + replace in place for one text container. Guarded so the SAME
+  // container is never translated twice for the same source text
+  // (dataset.translated), never has two requests in flight at once
+  // (dataset.axiomPending), and isn't hammered right after a failure
+  // (dataset.axiomFailedAt cooldown). Generic over WHICH container it's
+  // given — called independently for the main post text and for a nested
+  // quoted post's text, each with its own dataset flags, so one never blocks
+  // or is skipped because of the other's state.
+  async function translateContainer(container, parsed) {
     if (!container || !document.body.contains(container)) return;
 
-    // Strict media-preservation guard: findTextContainer already refuses
+    // Strict media-preservation guard: findBodyContainer already refuses
     // media-wrapping candidates, but never inject into one regardless of how
     // `container` got here.
     if (containsMedia(container)) {
@@ -713,8 +951,18 @@
       return;
     }
 
+    // Deduplication safeguard. Deliberately does NOT also require
+    // dataset.originalText to still match parsed.postText: once this
+    // container is translated, its own DOM content IS the translated text,
+    // so a later re-parse of the card (triggered by our own innerHTML
+    // write, which fires another MutationObserver batch) re-extracts THAT
+    // translated text as the "new" postText — an originalText comparison
+    // would then mismatch the stale English snapshot and wrongly trigger a
+    // second translation pass on an already-translated node (the exact
+    // cause of the quoted-block duplicate/stacked-text bug). The target
+    // language is the only thing allowed to invalidate this flag.
     if (container.dataset.translated === 'true' &&
-        container.dataset.originalText === parsed.postText) {
+        container.dataset.translatedLang === settings.targetLang) {
       return;
     }
 
@@ -738,22 +986,6 @@
 
       applyInlineTranslation(container, parsed, result.translatedText, parsed.previewEl);
       console.log(`${LOG} translated & inserted:`, result.translatedText.slice(0, 80));
-
-      // Translate the nested quoted/reply post separately and replace its
-      // own text container in place (its header/handle stays untouched —
-      // Axiom already renders that natively).
-      if (parsed.quoted) {
-        const qres = await translateWithTimeout(parsed.quoted.translationSource || parsed.quoted.postText);
-        if (qres?.ok && document.body.contains(cardEl)) {
-          const quoteContainer = findQuoteContainer(cardEl, parsed.quoted.handle);
-          const quoteTextEl = quoteContainer
-            ? (findTextContainer(quoteContainer, parsed.quoted.postText, null, parsed.quoted.handle) || quoteContainer)
-            : null;
-          if (quoteTextEl && quoteTextEl !== container && !containsMedia(quoteTextEl)) {
-            applyInlineTranslation(quoteTextEl, parsed.quoted, qres.translatedText);
-          }
-        }
-      }
     } catch (e) {
       console.error(`${LOG} translateContainer error:`, e);
     } finally {
@@ -761,25 +993,75 @@
     }
   }
 
+  // True only when a DIFFERENT, unrelated element already holds a
+  // translation of the EXACT SAME original text (data-original-text match)
+  // — e.g. Axiom duplicating a short snippet in two places in the same
+  // card. Deliberately does NOT flag "anything else in this card is
+  // translated" (that broader check was tried before and false-positived
+  // against a legitimate quote sitting in the same card, since a quote's
+  // text is always different from the main post's).
+  function hasDuplicateTranslatedText(scopeEl, candidate, expectedOriginalText) {
+    if (!expectedOriginalText) return false;
+    let nodes;
+    try { nodes = scopeEl.querySelectorAll('[data-translated="true"]'); } catch { return false; }
+    for (const n of nodes) {
+      if (n === candidate) continue;
+      if (n.contains(candidate) || candidate.contains(n)) continue;
+      if (n.dataset.originalText === expectedOriginalText) return true;
+    }
+    return false;
+  }
+
+  // Translates only the main post text. A nested quoted/reply post (if any)
+  // is deliberately left in its original language — see the comment further
+  // down for why.
   function handleCard(cardEl, parsed) {
     console.log(`${LOG} Extracted text:`, parsed.postText);
 
-    const textContainer = findTextContainer(cardEl, parsed.postText, parsed.previewEl, parsed.handle);
+    // Resolve the quote container FIRST so the main-body search can
+    // explicitly exclude it — the main tweet's text and a nested quote card
+    // must never be touched by the same pass (requirement: process each
+    // independently, never let one bleed into the other).
+    const quoteContainer = parsed.quoted ? findQuoteContainer(cardEl, parsed.quoted.handle) : null;
+
+    // ── Pass 1: main post text ──────────────────────────────────────────
+    const textContainer = findBodyContainer(cardEl, {
+      handle: parsed.handle,
+      previewEl: parsed.previewEl,
+      excludeContainers: [quoteContainer, parsed.embeddedCardEl].filter(Boolean),
+      expectedLength: parsed.postText.length
+    });
+
     if (!textContainer) {
       // Not a hard failure — a still-mounting DOM (e.g. the link preview
       // hasn't loaded yet) can legitimately not match on this pass. No
       // dataset flags are set here, so the next MutationObserver batch is
       // free to retry without any cooldown.
       console.warn(`${LOG} text container not found for extracted text:`, parsed.postText);
-      return;
+    } else if (hasDuplicateTranslatedText(cardEl, textContainer, parsed.postText)) {
+      // Some cards genuinely render the same short text twice (e.g. a
+      // preview snippet duplicated elsewhere in the card). Only skip when
+      // another element ALREADY translated this EXACT same source text —
+      // unlike the broad "anything else in this card is translated" guard
+      // tried earlier, this can never false-positive against a legitimate,
+      // differently-worded quote sitting in the same card.
+      console.warn(`${LOG} duplicate-text guard: identical text already translated elsewhere in this card`, textContainer);
+    } else {
+      // translateContainer has its own "already translated" guard, so it's
+      // always safe to call here — no need to duplicate that check first.
+      translateContainer(textContainer, parsed);
     }
 
-    if (textContainer.dataset.translated === 'true' &&
-        textContainer.dataset.originalText === parsed.postText) {
-      return;
-    }
-
-    translateContainer(cardEl, textContainer, parsed);
+    // The nested quoted/reply post is deliberately left untouched. Its text
+    // is still subtracted from the main post above (see quotedSet in
+    // parseCard/detectQuoted) so it never contaminates the main
+    // translation, and quoteContainer is still excluded from the main-body
+    // search above — but no translation is attempted on the quote itself.
+    // The line between "where the main tweet ends" and "where the quote
+    // begins" is itself extracted heuristically from one flattened
+    // innerText, and on some card layouts that boundary is wrong; without
+    // live access to Axiom's DOM, repeatedly guessing at a fix for the
+    // quote's own text has caused more regressions than it's worth.
   }
 
   // ── Mutation-driven detection ────────────────────────────────────────────
@@ -800,7 +1082,7 @@
   }
 
   function flushRoots() {
-    if (!settings.enabled) { pendingRoots.clear(); return; }
+    if (contextInvalidated || !settings.enabled) { pendingRoots.clear(); return; }
     const roots = pendingRoots;
     pendingRoots = new Set();
     for (const root of roots) {
@@ -811,27 +1093,62 @@
     }
   }
 
-  // Catches everything already on screen when the content script starts
-  // (or right after the translator is switched back on) — mutation-based
-  // detection alone would miss cards that were never mounted while we were
-  // watching.
-  function initialScan() {
-    if (!settings.enabled) return;
-    let nodes;
+  // Finds likely overlay/popover/portal roots instead of walking the whole
+  // page: common tooltip/dialog roles and class-name hints, plus any DIRECT
+  // child of <body> that is itself fixed/absolute (covers custom-built
+  // tooltips with no semantic hints at all — most portal libraries append
+  // straight to <body>).
+  function findOverlayRoots() {
+    const roots = new Set();
     try {
-      nodes = document.querySelectorAll('div, section, article');
-    } catch {
-      return;
-    }
-    console.log(`${LOG} initial scan:`, nodes.length, 'candidate nodes');
-    for (const n of nodes) {
-      const parsed = parseCard(n);
-      if (parsed) handleCard(n, parsed);
+      document
+        .querySelectorAll(
+          '[role="tooltip"], [role="dialog"], [data-radix-popper-content-wrapper], ' +
+          '[data-floating-ui-portal], [class*="tooltip" i], [class*="popover" i], ' +
+          '[class*="overlay" i], [class*="portal" i]'
+        )
+        .forEach((el) => roots.add(el));
+    } catch { /* ignore */ }
+
+    try {
+      Array.from(document.body.children).forEach((el) => {
+        if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE' || el.tagName === 'LINK') return;
+        let pos;
+        try { pos = getComputedStyle(el).position; } catch { return; }
+        if (pos === 'fixed' || pos === 'absolute') roots.add(el);
+      });
+    } catch { /* ignore */ }
+
+    return Array.from(roots);
+  }
+
+  // Catches whatever tweet card/tooltip is already floating on screen when
+  // the content script starts (or right after re-enabling / switching
+  // language) — mutation-based detection alone would miss it. Scoped to
+  // overlay roots only, never a full-page scan: a heavy Axiom page can have
+  // thousands of table/list rows, and scanning all of them on every
+  // initialScan() call is exactly what produced the false-positive flood.
+  function initialScan() {
+    if (contextInvalidated || !settings.enabled) return;
+    const roots = findOverlayRoots();
+    if (!roots.length) return;
+
+    console.log(`${LOG} initial scan:`, roots.length, 'overlay root(s)');
+    for (const root of roots) {
+      const parsedRoot = parseCard(root);
+      if (parsedRoot) { handleCard(root, parsedRoot); continue; }
+
+      let nodes;
+      try { nodes = root.querySelectorAll('div, section, article'); } catch { continue; }
+      for (const n of nodes) {
+        const parsed = parseCard(n);
+        if (parsed) handleCard(n, parsed);
+      }
     }
   }
 
   const observer = new MutationObserver((mutations) => {
-    if (!settings.enabled) return;
+    if (contextInvalidated || !settings.enabled) return;
     const roots = [];
     for (const m of mutations) {
       if (m.type === 'childList') {
