@@ -19,7 +19,22 @@ const CONFIG = {
   target: 'ru' // default target if a request omits one
 };
 
-const cache = new Map();
+// In-memory Map would be wiped every time the MV3 service worker unloads
+// (~30s idle). chrome.storage.session survives worker restarts within the
+// browser session, so repeat translations stay instant after a cold start.
+async function cacheGet(key) {
+  try {
+    const data = await chrome.storage.session.get(key);
+    return data[key];
+  } catch {
+    return undefined;
+  }
+}
+async function cacheSet(key, value) {
+  try {
+    await chrome.storage.session.set({ [key]: value });
+  } catch { /* quota or unavailable — non-fatal */ }
+}
 
 // ── Providers ───────────────────────────────────────────────────────────────
 const PROVIDERS = {
@@ -161,8 +176,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     const cacheKey = `${target}::${text}`;
-    if (cache.has(cacheKey)) {
-      sendResponse({ ok: true, translatedText: cache.get(cacheKey), cached: true });
+    const cached = await cacheGet(cacheKey);
+    if (cached) {
+      sendResponse({ ok: true, translatedText: cached, cached: true });
       return;
     }
 
@@ -172,7 +188,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     try {
       // Auto-retry transient failures (300ms, then 800ms) before giving up.
       const { translatedText } = await withRetry(() => provider(text, target));
-      cache.set(cacheKey, translatedText);
+      await cacheSet(cacheKey, translatedText);
       sendResponse({ ok: true, translatedText, provider: providerName });
     } catch (error) {
       const msg = error && error.message ? error.message : String(error);

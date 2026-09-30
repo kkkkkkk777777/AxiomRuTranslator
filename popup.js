@@ -8,11 +8,8 @@ const LAST_KEY = 'axiomRuLast';
 const DEFAULTS = {
   autoTranslate: true,
   preserveLinks: true,
-  uiLang: 'ru',       // ru | en — UI language (also the translation target)
-  side: 'auto',       // right | left | auto
-  closeDelay: 'fast', // fast | normal
-  theme: 'auto',      // light | dark | auto
-  fontSize: 'medium'  // small | medium | large
+  uiLang: 'ru',  // ru | en — UI language (also the translation target)
+  theme: 'auto'  // light | dark | auto — popup's own appearance
 };
 
 // UI label translations. Keys map to [data-i18n] attributes in popup.html.
@@ -22,13 +19,10 @@ const I18N = {
     telegram: 'Telegram',
     language: 'Language',
     autoTitle: 'Auto-translate on hover',
-    autoSub: 'Show the popup when hovering a post',
+    autoSub: "Replace the post's text in place",
     preserveTitle: 'Preserve original links',
     preserveSub: 'Keep real hrefs as clickable links',
-    side: 'Popup side', right: 'Right', left: 'Left', auto: 'Auto',
-    closeDelay: 'Close delay', fast: 'Fast', normal: 'Normal',
-    theme: 'Theme', light: 'Light', dark: 'Dark',
-    fontSize: 'Font size',
+    theme: 'Theme', light: 'Light', dark: 'Dark', auto: 'Auto',
     copyTranslation: 'Copy last translation',
     copyOriginal: 'Copy original text',
     openSource: 'Open original post',
@@ -39,13 +33,10 @@ const I18N = {
     telegram: 'Телеграм',
     language: 'Язык',
     autoTitle: 'Автоперевод при наведении',
-    autoSub: 'Показывать всплывающее окно при наведении',
+    autoSub: 'Заменять текст поста прямо на месте',
     preserveTitle: 'Сохранять ссылки',
     preserveSub: 'Оставлять реальные ссылки кликабельными',
-    side: 'Сторона окна', right: 'Справа', left: 'Слева', auto: 'Авто',
-    closeDelay: 'Задержка закрытия', fast: 'Быстро', normal: 'Обычно',
-    theme: 'Тема', light: 'Светлая', dark: 'Тёмная',
-    fontSize: 'Размер шрифта',
+    theme: 'Тема', light: 'Светлая', dark: 'Тёмная', auto: 'Авто',
     copyTranslation: 'Копировать перевод',
     copyOriginal: 'Копировать оригинал',
     openSource: 'Открыть исходный пост',
@@ -69,6 +60,27 @@ function applyI18n() {
 
 let settings = { ...DEFAULTS };
 
+// ── Instant-paint cache ──────────────────────────────────────────────────────
+// localStorage reads are synchronous, so the popup can paint with the
+// last-known settings immediately instead of waiting on chrome.storage.sync
+// (which can add a visible delay, especially over a slow sync connection).
+const CACHE_KEY = 'axiomRuSettingsCache';
+
+function readCachedSettings() {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    return raw ? { ...DEFAULTS, ...JSON.parse(raw) } : { ...DEFAULTS };
+  } catch {
+    return { ...DEFAULTS };
+  }
+}
+
+function writeCachedSettings(s) {
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify(s));
+  } catch { /* storage unavailable — non-fatal */ }
+}
+
 // ── Storage helpers ─────────────────────────────────────────────────────────
 function loadSettings() {
   return new Promise((resolve) => {
@@ -80,6 +92,7 @@ function loadSettings() {
 }
 
 function saveSettings() {
+  writeCachedSettings(settings);
   chrome.storage.sync.set({ [SETTINGS_KEY]: settings });
 }
 
@@ -134,12 +147,14 @@ async function refreshActionState() {
   document.getElementById('openSource').disabled = !(last && last.sourceUrl);
 }
 
-function init() {
+function paint() {
   applyTheme();
   applyI18n();
   renderControls();
   refreshActionState();
+}
 
+function wireEvents() {
   // Toggle rows
   document.querySelectorAll('.toggle-row').forEach((row) => {
     row.addEventListener('click', () => {
@@ -186,4 +201,14 @@ function init() {
   });
 }
 
-loadSettings().then(init);
+// Paint immediately from the synchronous local cache so the popup never
+// looks frozen, then reconcile with chrome.storage.sync in the background.
+settings = readCachedSettings();
+paint();
+wireEvents();
+
+loadSettings().then((fresh) => {
+  settings = fresh;
+  writeCachedSettings(fresh);
+  paint();
+});
